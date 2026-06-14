@@ -3,6 +3,8 @@ const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+const RESEND_API_KEY = process.env.RESEND_API_KEY || 're_YhHdr1VU_Lim3gaHots12ZffjkrS8MxZq';
+const ALERT_EMAIL = 'Gabriels.fix@gmail.com';
 
 const GROUPS = [
   { name: 'Compra Certa Fatura Incerta', emoji: '🛒', url: 'https://chat.whatsapp.com/JDmIbXGked57w5AXBad4Ea?s=cl&p=i&ilr=1' },
@@ -12,7 +14,7 @@ const GROUPS = [
 ];
 
 const status = {};
-GROUPS.forEach(g => { status[g.name] = { ok: null, lastCheck: null, history: [] }; });
+GROUPS.forEach(g => { status[g.name] = { ok: null, lastCheck: null, alerted: false, history: [] }; });
 
 function checkLink(url) {
   return new Promise((resolve) => {
@@ -31,20 +33,70 @@ function checkLink(url) {
   });
 }
 
+function sendAlert(group) {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({
+      from: 'Monitor <onboarding@resend.dev>',
+      to: [ALERT_EMAIL],
+      subject: `🚨 Link inválido: ${group.name}`,
+      html: `
+        <div style="font-family:sans-serif;max-width:520px;margin:0 auto;background:#0a0c0f;color:#e8eaf0;padding:32px;border-radius:12px">
+          <h2 style="color:#ff4d4d;margin-bottom:16px">🚨 Link caiu!</h2>
+          <p style="margin-bottom:12px">O grupo <strong>${group.emoji} ${group.name}</strong> está com o link inválido.</p>
+          <div style="background:#13161b;border:1px solid #1e2329;border-radius:8px;padding:16px;margin-bottom:20px;word-break:break-all;font-size:13px;color:#6b7280">${group.url}</div>
+          <p style="margin-bottom:20px;color:#9ca3af">Atualize o link no site <strong>descontos.pages.dev</strong> e no monitor o quanto antes.</p>
+          <a href="https://link-monitor-v5in.onrender.com" style="background:#ffc107;color:#0a0c0f;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Ver painel do monitor</a>
+        </div>
+      `
+    });
+
+    const req = https.request({
+      hostname: 'api.resend.com',
+      path: '/emails',
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body)
+      }
+    }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        console.log(`Email enviado para ${ALERT_EMAIL}: ${res.statusCode}`);
+        resolve(res.statusCode);
+      });
+    });
+    req.on('error', (e) => { console.error('Erro email:', e); resolve(0); });
+    req.write(body);
+    req.end();
+  });
+}
+
 async function runChecks() {
   const now = new Date();
   console.log(`[${now.toISOString()}] Iniciando checks...`);
   for (const group of GROUPS) {
     const result = await checkLink(group.url);
+    const prev = status[group.name].ok;
+
     status[group.name].lastCheck = now.toISOString();
     status[group.name].ok = result.ok;
     status[group.name].history.unshift({ time: now.toISOString(), ok: result.ok });
     if (status[group.name].history.length > 24) status[group.name].history.pop();
+
+    // Envia email só quando MUDA de ativo para inativo (evita spam)
+    if (prev === true && result.ok === false && !status[group.name].alerted) {
+      status[group.name].alerted = true;
+      await sendAlert(group);
+    }
+    // Reset do alerta quando volta a funcionar
+    if (result.ok === true) status[group.name].alerted = false;
+
     console.log(`  ${result.ok ? '✅' : '❌'} ${group.name}`);
   }
 }
 
-// Roda ao iniciar e a cada 1 hora
 runChecks();
 setInterval(runChecks, 60 * 60 * 1000);
 
@@ -107,7 +159,7 @@ app.get('/', (req, res) => {
   </div>
   <div class="cards" id="cards"><div style="color:var(--muted);text-align:center;padding:40px">Carregando...</div></div>
 </main>
-<div class="footer">Checa a cada <span>1 hora</span> · descontos.pages.dev</div>
+<div class="footer">Checa a cada <span>1 hora</span> · Email: ${ALERT_EMAIL}</div>
 <script>
 function fmt(iso){if(!iso)return'—';return new Date(iso).toLocaleString('pt-BR',{timeZone:'America/Belem',hour:'2-digit',minute:'2-digit',day:'2-digit',month:'2-digit'})}
 async function load(){
